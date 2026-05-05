@@ -38,6 +38,9 @@ metadata:
 | "0건 나왔어, 인접 지역" | 인접 지역 확장 제안 |
 | "이 공고 분석해줘", "공고 해석해줘", "자격 요건 알려줘" | **모집공고 해석자** — 원문 추출 + LLM 요약 |
 | "이 공고 신청 가능해?", "내 자격 확인", "매칭 확인" | `/v1/apt/match` 적합도 판정 |
+| "1순위 돼?", "납입횟수 충분해?", "1순위 자격" | `/v1/apt/score` + `announcements` 배열 → `priority_checks` |
+| "캘린더에 추가해줘", "일정 저장", ".ics" | `GET /v1/apt/announcements/{id}/ics` → 다운로드 링크 안내 |
+| "경쟁률 어때?", "몇 대 일이야?", "예상 경쟁률" | `GET /v1/apt/announcements/{id}/competition` 통계 추정 |
 
 ### 3. 프록시 호출 규칙 (필수)
 
@@ -94,6 +97,41 @@ metadata:
 - POST body 예시: `{"profile": {"preferred_categories": ["APT"], "preferred_regions": ["서울","경기"], "min_units": 300}, "announcements": [{"id": "...", "house_category": "APT", "region": "서울", "total_units": "641"}]}`
 - 응답: `{"matches": [{"id": "...", "category_match": true, "region_match": true, "min_units_ok": true, "needs_account": true, "fit_level": "high"}], "count": N}`
 - `fit_level`: `"high"` (3/3 충족) · `"medium"` (2/3) · `"low"` (1/3 이하)
+
+**1순위 자격 판정 (`/v1/apt/score` + `announcements` 배열)**
+- 납입횟수 기준: 투기과열지구 24회 / 수도권(서울·경기·인천) 12회 / 기타 6회
+- `/v1/apt/score` POST body에 `"announcements": [...]` 추가 → 응답에 `priority_checks` 배열 포함
+- POST body 예시:
+  ```json
+  {"profile": {"subscription_account": {"deposit_count": 18}, "no_house": true, "previous_win": "없음"},
+   "announcements": [{"id": "apt_001", "speculative_zone": "N", "region": "서울"}]}
+  ```
+- 응답: `{"scores": {...}, "specials": {...}, "priority_checks": [{"id": "apt_001", "eligible": true, "reason": "수도권 1순위 충족 (납입 18회 ≥ 12회)", "required_count": 12, "user_count": 18, "zone": "수도권", "warnings": [...]}]}`
+- ⚠️ 거주지역 요건(해당 지역 거주기간)은 공고문에서 반드시 확인 필요
+
+**청약 일정 캘린더 다운로드 (`/v1/apt/announcements/{id}/ics`)**
+- 공고 접수 기간 + 추정 당첨발표(마감+8일) + 추정 계약(마감+21일) 이벤트 포함
+- 사용자에게는 **다운로드 링크를 직접 안내** (curl로 직접 호출하지 말 것)
+- 안내 예시: `"캘린더에 추가하려면 이 링크를 브라우저에서 열거나 구글 캘린더 → 다른 캘린더 → URL로 구독하세요: https://k-apt-alert-proxy.onrender.com/v1/apt/announcements/{id}/ics"`
+- 단, **캐시에 공고가 있어야** 동작 (먼저 /v1/apt/announcements로 조회 후 호출)
+
+**경쟁률 조회 (`/v1/apt/announcements/{id}/competition`)** — 3단 폴백
+- 1순위 **실제 결과** — 청약홈 당첨자 발표 페이지 HTML 파싱 (이미 마감·발표된 공고만)
+- 2순위 **지역 과거 이력** — `?history=true` 추가 시, 공공데이터포털 결과 API 기반 같은 지역 최근 12개월 실제 경쟁률 평균
+- 3순위 **통계 추정치** — 위 둘 다 없으면 2024-2025 통계 기반 폴백
+- 호출 예시:
+  ```bash
+  # 기본 (실제 결과 → 통계 추정 폴백)
+  curl -s --max-time 15 "https://k-apt-alert-proxy.onrender.com/v1/apt/announcements/{id}/competition"
+  # 지역 이력 활용 (마감 전 공고에 권장)
+  curl -s --max-time 15 "https://k-apt-alert-proxy.onrender.com/v1/apt/announcements/{id}/competition?history=true"
+  ```
+- 응답 `source` 필드로 어느 단계가 응답했는지 식별:
+  - `source: "applyhome"` — 실제 결과 (가장 정확)
+  - `source: "regional_history"` — 같은 지역 실제 평균 (`history`, `avg_rate`, `avg_cutoff_score`, `most_recent`, `history_count`)
+  - `data_type: "통계 추정치"` — 폴백 추정 (`avg_rate`, `avg_cutoff_score`, `note`)
+- 출력 시 `disclaimer` 그대로 노출 (실제 vs 추정 여부 구분 명시)
+- 통계 추정 폴백 시 지역별 참고: 서울 투기과열 소형 160:1 / 서울 일반 소형 85:1 / 경기 일반 소형 28:1 / 기타 소형 9:1
 
 **최소 호출 원칙**
 - 공고 조회는 필요한 `category`와 `region`만 지정해서 **단일 호출**
